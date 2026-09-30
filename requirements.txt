@@ -1,0 +1,11 @@
+# Pinned to versions compatible with CleanRL's single-file scripts.
+# gymnasium 1.x changed autoreset / final_info semantics and breaks the scripts, so keep 0.29.x.
+torch==2.4.1            # PyPI Linux wheel ships with CUDA 12.1 runtime (works on RTX 40xx)
+gymnasium[classic-control]==0.29.1
+numpy==1.26.4           # gymnasium 0.29 is not numpy-2 compatible
+tyro==0.5.10
+tensorboard==2.17.1
+wandb==0.18.7
+moviepy==1.0.3          # used by gymnasium 0.29 RecordVideo
+imageio==2.35.1
+imageio-ffmpeg==0.5.1

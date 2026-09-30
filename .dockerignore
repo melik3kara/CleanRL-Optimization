@@ -1,0 +1,6 @@
+.git
+.env
+runs/
+videos/
+wandb/
+__pycache__/

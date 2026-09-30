@@ -1,0 +1,7 @@
+.env
+runs/
+videos/
+wandb/
+__pycache__/
+*.pyc
+*.cleanrl_model

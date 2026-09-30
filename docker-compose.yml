@@ -1,0 +1,23 @@
+services:
+  rl:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: cleanrl-opt:latest
+    env_file: .env
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    shm_size: 2gb
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
