@@ -1,7 +1,8 @@
 FROM python:3.10-slim
 
-# ffmpeg for encoding videos, git for wandb run metadata
-RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg \
+# ffmpeg for encoding videos, git for wandb run metadata,
+# build-essential + swig to build box2d (LunarLander) when no prebuilt wheel exists for the platform
+RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg build-essential swig \
     && rm -rf /var/lib/apt/lists/*
 
 # SDL_VIDEODRIVER=dummy lets pygame render rgb_array frames headless (video capture)

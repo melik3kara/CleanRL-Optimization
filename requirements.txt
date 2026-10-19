@@ -1,11 +1,16 @@
 # Pinned to versions compatible with CleanRL's single-file scripts.
-# gymnasium 1.x changed autoreset / final_info semantics and breaks the scripts, so keep 0.29.x.
+# gymnasium 1.x defaults to NEXT_STEP autoreset; the scripts opt into SAME_STEP (gym.vector.AutoresetMode.SAME_STEP)
+# so done-step semantics match CleanRL's GAE loop.
 torch==2.4.1            # PyPI Linux wheel ships with CUDA 12.1 runtime (works on RTX 40xx)
-gymnasium[classic-control]==0.29.1
-numpy==1.26.4           # gymnasium 0.29 is not numpy-2 compatible
+gymnasium[classic-control]==1.2.3
+# LunarLander-v3 deps. Not using gymnasium[box2d]: its box2d==2.3.10 has no linux/arm64 wheel (Apple Silicon Docker).
+# box2d-py provides the same Box2D module and builds from source with swig on any arch.
+box2d-py==2.3.8
+pygame==2.6.1
+numpy==1.26.4
 tyro==0.5.10
 tensorboard==2.17.1
 wandb==0.18.7
-moviepy==1.0.3          # used by gymnasium 0.29 RecordVideo
+moviepy==1.0.3          # used by gymnasium RecordVideo
 imageio==2.35.1
 imageio-ffmpeg==0.5.1

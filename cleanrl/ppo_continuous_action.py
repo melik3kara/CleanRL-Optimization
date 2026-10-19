@@ -13,6 +13,8 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+from cleanrl_utils.evals.ppo_eval import evaluate_agent, find_wrapper
+
 
 @dataclass
 class Args:
@@ -26,7 +28,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = os.environ.get("WANDB_PROJECT", "SAGE-RL-OPT")
+    wandb_project_name: str = os.environ.get("WANDB_PROJECT", "lunar-lander-ppo-sage")
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -38,9 +40,15 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
+    run_dir: str = ""
+    """directory for TensorBoard logs and the saved model (defaults to `runs/{run_name}`)"""
+    eval_freq: int = 25000
+    """evaluate the deterministic policy every `eval_freq` global steps (0 disables periodic evaluation)"""
+    eval_episodes: int = 10
+    """the number of episodes per periodic evaluation"""
 
     # Algorithm specific arguments
-    env_id: str = "MountainCarContinuous-v0"
+    env_id: str = "LunarLanderContinuous-v3"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -95,7 +103,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), env.observation_space)
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
@@ -147,6 +155,7 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    args.run_dir = args.run_dir or f"runs/{run_name}"
     if args.track:
         import wandb
 
@@ -159,7 +168,7 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
+    writer = SummaryWriter(args.run_dir)
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -174,8 +183,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
+    # SAME_STEP autoreset: on a done step the returned obs is already the reset obs (gymnasium 0.29 behaviour),
+    # so no dummy transition is stored and the GAE loop below stays correct. gymnasium 1.x default is NEXT_STEP.
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)],
+        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -196,6 +208,7 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+    next_eval_step = args.eval_freq
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -222,12 +235,13 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            if "final_info" in infos:
-                for info in infos["final_info"]:
-                    if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+            # gymnasium 1.x: final_info is a dict of arrays over envs, "_episode" masks which envs finished
+            if "final_info" in infos and "episode" in infos["final_info"]:
+                episode = infos["final_info"]["episode"]
+                for i in np.where(infos["final_info"]["_episode"])[0]:
+                    print(f"global_step={global_step}, episodic_return={episode['r'][i]}")
+                    writer.add_scalar("charts/episodic_return", episode["r"][i], global_step)
+                    writer.add_scalar("charts/episodic_length", episode["l"][i], global_step)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -323,8 +337,30 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+        # periodic evaluation (deterministic actions, obs normalization stats copied from training env 0)
+        if args.eval_freq > 0 and (global_step >= next_eval_step or iteration == args.num_iterations):
+            obs_rms = find_wrapper(envs.envs[0], gym.wrappers.NormalizeObservation).obs_rms
+            eval_returns, landings = evaluate_agent(
+                agent, make_env, args.env_id, args.eval_episodes, obs_rms, seed=args.seed + 100_000,
+                device=device, gamma=args.gamma,
+            )
+            writer.add_scalar("eval/episodic_return_mean", np.mean(eval_returns), global_step)
+            writer.add_scalar("eval/episodic_return_std", np.std(eval_returns), global_step)
+            if landings is not None:
+                landed, between_flags = np.array(landings).T
+                writer.add_scalar("eval/landed_rate", landed.mean(), global_step)
+                writer.add_scalar("eval/between_flags_rate", between_flags.mean(), global_step)
+                if landed.any():  # share of landings that are between the flags
+                    writer.add_scalar("eval/between_flags_share_of_landings", between_flags.sum() / landed.sum(), global_step)
+            print(
+                f"global_step={global_step}, eval_return_mean={np.mean(eval_returns):.2f}"
+                + (f", landed={landed.mean():.0%}, between_flags={between_flags.mean():.0%}" if landings is not None else "")
+            )
+            while next_eval_step <= global_step:
+                next_eval_step += args.eval_freq
+
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"{args.run_dir}/{args.exp_name}.cleanrl_model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from cleanrl_utils.evals.ppo_eval import evaluate
@@ -347,7 +383,7 @@ if __name__ == "__main__":
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "PPO", f"runs/{run_name}", f"videos/{run_name}-eval")
+            push_to_hub(args, episodic_returns, repo_id, "PPO", args.run_dir, f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()
